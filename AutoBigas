@@ -1,1 +1,793 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
+#include <HX711.h>
 
+const char* ssid = "Autobigas.Connect";
+const char* password = "12345678";
+WebServer server(80);
+
+#define TFT_CS 5
+#define TFT_DC 2
+#define TFT_RST 4
+
+#define RELAY_JASMINE 16
+#define RELAY_SINANDOMENG 14
+#define RELAY_DINORADO 27
+
+#define SR_PL 15
+#define SR_CLK 26
+#define SR_DATA 35
+
+#define HX711_DT 32
+#define HX711_SCK 33
+
+#define TRIG_JASMINE 13
+#define ECHO_JASMINE 34
+#define TRIG_SINANDOMENG 25
+#define ECHO_SINANDOMENG 19
+#define TRIG_DINORADO 22
+#define ECHO_DINORADO 21
+
+const float PRICE_JASMINE = 58.0;
+const float PRICE_SINANDOMENG = 52.0;
+const float PRICE_DINORADO = 55.0;
+
+float calibrationFactor = 215.23; 
+
+const float BIN_EMPTY_DISTANCE = 30.0;
+const float BIN_FULL_DISTANCE = 5.0;
+const float MAX_KG = 10.0;
+
+TFT_eSPI tft = TFT_eSPI();
+HX711 scale;
+
+enum SystemState { STATE_IDLE, STATE_VARIETY_SELECTED, STATE_READY, STATE_DISPENSING, STATE_DONE };
+SystemState currentState = STATE_IDLE;
+
+String selectedVariety = "";
+float selectedPricePerKg = 0;
+float selectedKilo = 0;
+
+unsigned long lastDebounce = 0;
+const unsigned long debounceDelay = 200;
+
+unsigned long lastUltrasonicCheck = 0;
+const unsigned long ultrasonicInterval = 2000;
+float jasmineKg=0, sinandomengKg=0, dinoradoKg=0;
+
+unsigned long lastLoadCellPrint = 0;
+const unsigned long loadCellPrintInterval = 500;
+float loadCellKg = 0;
+float lastGoodKg = 0;
+unsigned long lastDispPrint = 0;
+unsigned long lastSRPrint = 0;
+uint16_t lastButtons = 0;
+
+bool remoteDispenseRequested = false;
+int remoteCompartment = 0;
+float remoteWeight = 0;
+
+bool prevBtnJasmine=false, prevBtnSinandomeng=false, prevBtnDinorado=false;
+bool prevBtnCancel=false, prevBtnConfirm=false;
+bool prevBtnIncrement=false, prevBtnDecrement=false;
+
+String calBuffer = "";
+int calStage = 0;
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Autobigas.Connect</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif}body{background-color:#f4f7f6;color:#333;min-height:100vh}.dashboard-header{background:#2c3e50;color:white;padding:18px 30px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 4px 6px rgba(0,0,0,0.1);gap:15px;flex-wrap:wrap}.header-logo{font-size:22px;font-weight:800}.header-logo span{color:#e67e22}.dashboard-content{padding:20px;max-width:1300px;margin:0 auto}.section-title{font-size:20px;font-weight:700;color:#2c3e50;margin:20px 0;border-bottom:2px solid #e0e6ed;padding-bottom:10px}.connection-card{background:white;padding:20px;border-radius:12px;box-shadow:0 5px 15px rgba(0,0,0,0.05);margin-bottom:20px}.connection-card h3{color:#2c3e50;margin-bottom:10px}.esp-note{font-size:13px;color:#7f8c8d;line-height:1.6;margin-top:10px}#flowStatus{font-weight:700;color:#2c3e50;background:#f8f9fa;padding:8px 12px;border-radius:6px;border-left:4px solid #e67e22;display:block;margin-top:10px}.demo-panel{background:#fff9e6;border:2px dashed #f39c12;padding:15px;border-radius:8px;margin-top:15px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}.demo-toggle{display:flex;align-items:center;gap:10px;font-weight:700;color:#d35400}.switch{position:relative;display:inline-block;width:50px;height:24px}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#ccc;transition:.4s;border-radius:24px}.slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background-color:white;transition:.4s;border-radius:50%}input:checked+.slider{background-color:#f39c12}input:checked+.slider:before{transform:translateX(26px)}.demo-btns{display:flex;gap:8px;flex-wrap:wrap}.demo-btn{padding:8px 12px;font-size:12px;font-weight:600;border:none;border-radius:5px;cursor:pointer;color:white}.btn-refill{background:#2ecc71}.btn-drain-low{background:#f39c12}.btn-drain-crit{background:#e74c3c}.compartments-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:20px}.comp-card{background:white;border-radius:12px;padding:20px;box-shadow:0 5px 15px rgba(0,0,0,0.05);display:flex;flex-direction:column;align-items:center;border-top:5px solid #2ecc71}.comp-card.warning{border-top-color:#f39c12}.comp-card.danger{border-top-color:#e74c3c}.comp-card.waiting{border-top-color:#95a5a6}.comp-title{font-size:18px;font-weight:700;color:#2c3e50;margin-bottom:5px}.comp-rice-type{font-size:13px;color:#7f8c8d;margin-bottom:15px}.tank-container{display:flex;align-items:flex-end;gap:20px;width:100%;margin-bottom:15px}.tank{width:60px;height:150px;border:3px solid #34495e;border-radius:0 0 15px 15px;position:relative;background:#ecf0f1;overflow:hidden;flex-shrink:0}.tank-fill{position:absolute;bottom:0;width:100%;background:#2ecc71;transition:height 0.5s ease}.tank.warning .tank-fill{background:#f39c12}.tank.danger .tank-fill{background:#e74c3c}.tank.waiting .tank-fill{background:#bdc3c7}.tank-data{flex:1;text-align:left}.tank-weight{font-size:28px;font-weight:800;color:#2c3e50}.tank-max{font-size:14px;color:#7f8c8d}.tank-percent{font-size:16px;font-weight:600;margin-top:5px}.report-summary{width:100%;background:#f8f9fa;padding:12px;border-radius:8px;font-size:13px;color:#555;text-align:left;line-height:1.6;margin-bottom:10px}.status-badge{display:inline-block;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:700;color:white;margin-bottom:8px}.badge-safe{background:#2ecc71}.badge-low{background:#f39c12}.badge-critical{background:#e74c3c;animation:pulse 1.5s infinite}.badge-waiting{background:#95a5a6}@keyframes pulse{0%{opacity:1}50%{opacity:.6}100%{opacity:1}}.forecast-box{width:100%;background:#e8f4fd;border:1px dashed #3498db;border-radius:8px;padding:12px;margin-bottom:15px;font-size:12px;color:#1f618d;text-align:left;line-height:1.6}.forecast-item{display:block;margin-top:4px}.forecast-item strong{color:#2980b9}.dispense-controls{display:flex;gap:10px;width:100%;margin-top:10px}.dispense-select{flex:1;padding:12px;border:2px solid #e0e6ed;border-radius:8px;font-size:15px;font-weight:600;outline:none;background:white;color:#2c3e50}.btn-dispense{flex:1.2;padding:12px;background:#3498db;color:white;border:none;border-radius:8px;font-weight:600;font-size:15px;cursor:pointer}.btn-dispense:hover{background:#2980b9}.btn-dispense:disabled{background:#bdc3c7;cursor:not-allowed}.dispense-status{margin-top:10px;font-size:14px;font-weight:700;height:20px;text-align:center}.dispensing{color:#e67e22;animation:pulse 1s infinite}.done{color:#2ecc71}.error-text{color:#e74c3c}.alerts-panel{background:#fff3cd;border:1px solid #ffeeba;border-left:5px solid #e74c3c;padding:20px;border-radius:8px;margin-top:20px}.alerts-panel h3{color:#856404;margin-bottom:10px}.alert-item{background:white;padding:12px;border-radius:6px;margin-top:10px;border:1px solid #ffeeba;font-size:14px;color:#333;line-height:1.5}.alert-time{font-size:12px;color:#999;display:block;margin-top:5px}</style></head>
+<body><div id="dashboardPage"><header class="dashboard-header"><div class="header-logo">Auto<span>bigas</span>.Connect</div></header>
+<main class="dashboard-content">
+<div class="connection-card"><h3>ESP32 Local Connection (AP Mode)</h3><span id="espStatus" class="status-badge badge-waiting">Waiting</span><span id="flowStatus">Step: —</span><p class="esp-note">Connected to ESP32 Access Point. Live data streaming.</p>
+<div class="demo-panel"><div class="demo-toggle"><label class="switch"><input type="checkbox" id="demoToggle" onchange="toggleDemoMode()"><span class="slider"></span></label><span>DEMO MODE (Mock Data)</span></div>
+<div class="demo-btns"><button class="demo-btn btn-refill" onclick="simulateRefill()">Refill All (10kg)</button><button class="demo-btn btn-drain-low" onclick="simulateDrain(2, 2.5)">Drain Comp 2</button><button class="demo-btn btn-drain-crit" onclick="simulateDrain(3, 0.8)">Drain Comp 3</button></div></div></div>
+<h2 class="section-title">Compartment Monitoring & Remote Dispense</h2>
+<div class="compartments-grid">
+<div class="comp-card waiting" id="compCard1"><div class="comp-title">Compartment 1</div><div class="comp-rice-type">Jasmine</div><div class="tank-container"><div class="tank waiting" id="tank1"><div class="tank-fill" id="tankFill1" style="height:0%"></div></div><div class="tank-data"><div class="tank-weight"><span id="weight1">0.0</span> <span style="font-size:16px">kg</span></div><div class="tank-max">/ 10.0 kg max</div><div class="tank-percent" id="percent1" style="color:#95a5a6">0% Full</div></div></div><div class="forecast-box"><strong>📊 Depletion Forecast:</strong><span class="forecast-item">⏱️ Time to Low: <span id="forecastWarn1">--</span></span><span class="forecast-item">⏱️ Time to Critical: <span id="forecastCrit1">--</span></span></div><div class="report-summary"><span class="status-badge badge-waiting" id="statusBadge1">WAITING</span><br><strong>Sensor Report:</strong> <span id="report1">Waiting for ESP32 data.</span></div><div class="dispense-controls"><select class="dispense-select" id="dispenseWeight1"><option value="1">1 kg</option><option value="2">2 kg</option><option value="3">3 kg</option><option value="4">4 kg</option><option value="5">5 kg</option><option value="6">6 kg</option><option value="7">7 kg</option><option value="8">8 kg</option><option value="9">9 kg</option><option value="10">10 kg</option></select><button class="btn-dispense" id="dispenseBtn1" onclick="triggerDispense(1)">🔄 Dispense</button></div><div class="dispense-status" id="dispenseStatus1"></div></div>
+<div class="comp-card waiting" id="compCard2"><div class="comp-title">Compartment 2</div><div class="comp-rice-type">Sinandomeng</div><div class="tank-container"><div class="tank waiting" id="tank2"><div class="tank-fill" id="tankFill2" style="height:0%"></div></div><div class="tank-data"><div class="tank-weight"><span id="weight2">0.0</span> <span style="font-size:16px">kg</span></div><div class="tank-max">/ 10.0 kg max</div><div class="tank-percent" id="percent2" style="color:#95a5a6">0% Full</div></div></div><div class="forecast-box"><strong>📊 Depletion Forecast:</strong><span class="forecast-item">⏱️ Time to Low: <span id="forecastWarn2">--</span></span><span class="forecast-item">⏱️ Time to Critical: <span id="forecastCrit2">--</span></span></div><div class="report-summary"><span class="status-badge badge-waiting" id="statusBadge2">WAITING</span><br><strong>Sensor Report:</strong> <span id="report2">Waiting for ESP32 data.</span></div><div class="dispense-controls"><select class="dispense-select" id="dispenseWeight2"><option value="1">1 kg</option><option value="2">2 kg</option><option value="3">3 kg</option><option value="4">4 kg</option><option value="5">5 kg</option><option value="6">6 kg</option><option value="7">7 kg</option><option value="8">8 kg</option><option value="9">9 kg</option><option value="10">10 kg</option></select><button class="btn-dispense" id="dispenseBtn2" onclick="triggerDispense(2)">🔄 Dispense</button></div><div class="dispense-status" id="dispenseStatus2"></div></div>
+<div class="comp-card waiting" id="compCard3"><div class="comp-title">Compartment 3</div><div class="comp-rice-type">Dinorado</div><div class="tank-container"><div class="tank waiting" id="tank3"><div class="tank-fill" id="tankFill3" style="height:0%"></div></div><div class="tank-data"><div class="tank-weight"><span id="weight3">0.0</span> <span style="font-size:16px">kg</span></div><div class="tank-max">/ 10.0 kg max</div><div class="tank-percent" id="percent3" style="color:#95a5a6">0% Full</div></div></div><div class="forecast-box"><strong>📊 Depletion Forecast:</strong><span class="forecast-item">⏱️ Time to Low: <span id="forecastWarn3">--</span></span><span class="forecast-item">⏱️ Time to Critical: <span id="forecastCrit3">--</span></span></div><div class="report-summary"><span class="status-badge badge-waiting" id="statusBadge3">WAITING</span><br><strong>Sensor Report:</strong> <span id="report3">Waiting for ESP32 data.</span></div><div class="dispense-controls"><select class="dispense-select" id="dispenseWeight3"><option value="1">1 kg</option><option value="2">2 kg</option><option value="3">3 kg</option><option value="4">4 kg</option><option value="5">5 kg</option><option value="6">6 kg</option><option value="7">7 kg</option><option value="8">8 kg</option><option value="9">9 kg</option><option value="10">10 kg</option></select><button class="btn-dispense" id="dispenseBtn3" onclick="triggerDispense(3)">🔄 Dispense</button></div><div class="dispense-status" id="dispenseStatus3"></div></div>
+</div>
+<h2 class="section-title">System Alerts & Warnings</h2>
+<div class="alerts-panel"><h3>⚠️ Low Stock Alerts & Warnings</h3><div id="alertsList"><div class="alert-item">No active warnings. System is waiting for ESP32 sensor data.</div></div></div>
+</main></div>
+<script>const MAX_KG=10.0,DANGER_THRESHOLD=1.0,LOW_THRESHOLD=3.0;const DEPLETION_RATES={"Jasmine":0.5022,"Dinorado":0.3717,"Sinandomeng":0.3007};const ESP_URL="/sensors",REFRESH_INTERVAL=2000;let compartments=[{id:1,name:"Compartment 1",rice:"Jasmine",kg:null},{id:2,name:"Compartment 2",rice:"Sinandomeng",kg:null},{id:3,name:"Compartment 3",rice:"Dinorado",kg:null}];let monitoringTimer=null,demoMode=false,mockData={compartment1:10.0,compartment2:10.0,compartment3:10.0};function setEspStatus(t,s){const b=document.getElementById("espStatus");b.textContent=t;b.className="status-badge badge-"+s}function setFlowStatus(t){document.getElementById("flowStatus").textContent=t}async function requestSensorData(){if(demoMode){handleSensorData(mockData);monitoringTimer=setTimeout(requestSensorData,2000);return}try{const r=await fetch(ESP_URL,{cache:"no-store"});if(!r.ok)throw new Error();const d=await r.json();setEspStatus("Connected","safe");setFlowStatus("Live Data Streaming");handleSensorData(d)}catch(e){setEspStatus("Connecting...","waiting");setFlowStatus("Retrying...")}monitoringTimer=setTimeout(requestSensorData,REFRESH_INTERVAL)}function toggleDemoMode(){demoMode=document.getElementById("demoToggle").checked;if(demoMode)setEspStatus("DEMO MODE","safe");else setEspStatus("Connecting...","waiting")}function simulateRefill(){mockData={compartment1:10.0,compartment2:10.0,compartment3:10.0};if(demoMode)handleSensorData(mockData)}function simulateDrain(c,k){mockData["compartment"+c]=k;if(demoMode)handleSensorData(mockData)}function handleSensorData(d){if("compartment1"in d){updateCompartment(1,d.compartment1);updateCompartment(2,d.compartment2);updateCompartment(3,d.compartment3)}}function updateForecast(id,p){const c=compartments.find(x=>x.id===id);const r=DEPLETION_RATES[c.rice];document.getElementById("forecastWarn"+id).textContent=p>30?Math.round((p-30)/r)+" mins":"Reached!";document.getElementById("forecastCrit"+id).textContent=p>10?Math.round((p-10)/r)+" mins":"Reached!"}async function triggerDispense(id){const w=parseFloat(document.getElementById("dispenseWeight"+id).value);const btn=document.getElementById("dispenseBtn"+id),st=document.getElementById("dispenseStatus"+id);btn.disabled=true;st.textContent="CHECKING STOCK...";st.className="dispense-status dispensing";if(demoMode){mockData["compartment"+id]=Math.max(0,(mockData["compartment"+id]||0)-w);await new Promise(r=>setTimeout(r,2000));handleSensorData(mockData);st.textContent="DONE! ("+w+"kg)";st.className="dispense-status done"}else{try{const r=await fetch(ESP_URL+"?dispense="+id+"&weight="+w,{cache:"no-store"});const d=await r.json();if(d.status==="insufficient_stock"){st.textContent="⚠️ INSUFFICIENT STOCK ("+d.available+"kg left)";st.className="dispense-status error-text"}else{st.textContent="DONE! ("+w+"kg)";st.className="dispense-status done"}}catch(e){st.textContent="Connection Error";st.className="dispense-status error-text"}}setTimeout(()=>{st.textContent="";st.className="dispense-status";btn.disabled=false},4000)}function updateCompartment(id,kg){const c=compartments.find(x=>x.id===id);let s="waiting",kv=0,pv=0;if(kg!==null&&!isNaN(kg)){kv=Math.max(0,Math.min(MAX_KG,Number(kg)));pv=Math.round((kv/MAX_KG)*100);s=kv<=DANGER_THRESHOLD?"danger":kv<=LOW_THRESHOLD?"warning":"safe";c.kg=kv;updateForecast(id,pv)}document.getElementById("compCard"+id).className="comp-card "+s;document.getElementById("tank"+id).className="tank "+s;document.getElementById("tankFill"+id).style.height=pv+"%";document.getElementById("weight"+id).textContent=kv.toFixed(1);const pEl=document.getElementById("percent"+id);pEl.textContent=pv+"% Full";pEl.style.color=s==="safe"?"#2ecc71":s==="warning"?"#f39c12":s==="danger"?"#e74c3c":"#95a5a6";const b=document.getElementById("statusBadge"+id);b.textContent=s==="safe"?"SAFE":s==="warning"?"LOW":s==="danger"?"CRITICAL":"WAITING";b.className="status-badge badge-"+s}requestSensorData();</script></body></html>
+)rawliteral";
+
+uint16_t readShiftRegister() {
+  digitalWrite(SR_PL, LOW);
+  delayMicroseconds(10);
+  digitalWrite(SR_PL, HIGH);
+  delayMicroseconds(10);
+  uint16_t data = 0;
+  for (int i = 0; i < 8; i++) {   // ONE chip now = 8 bits
+    digitalWrite(SR_CLK, LOW);
+    delayMicroseconds(5);
+    data = (data << 1) | digitalRead(SR_DATA);
+    digitalWrite(SR_CLK, HIGH);
+    delayMicroseconds(5);
+  }
+  return data;
+}
+
+float stockFor(String v) {
+  if (v == "Jasmine") return jasmineKg;
+  if (v == "Sinandomeng") return sinandomengKg;
+  return dinoradoKg;
+}
+
+float readLoadCellKg() {
+  static float candidateKg = -1.0;
+  static byte candidateCount = 0;
+
+  for (int i = 0; i < 3; i++) {
+    if (scale.is_ready()) {
+      float grams = scale.get_units(10);
+      if (grams < 0) grams = 0;
+      float currentKg = grams / 1000.0;
+
+      float difference = abs(currentKg - lastGoodKg);
+
+      if (difference < 0.500) {
+        lastGoodKg = currentKg;
+        candidateKg = -1.0;
+        candidateCount = 0;
+        return currentKg;
+      } else {
+        if (candidateKg >= 0.0 && abs(currentKg - candidateKg) < 0.050) {
+          candidateCount++;
+          if (candidateCount >= 5) {
+            lastGoodKg = currentKg;   
+            candidateKg = -1.0;
+            candidateCount = 0;
+            return lastGoodKg;
+          }
+        } else {
+          candidateKg = currentKg;
+          candidateCount = 1;
+        }
+      }
+    } else {
+      scale.power_down();
+      delayMicroseconds(100);
+      scale.power_up();
+    }
+  }
+  return lastGoodKg;
+}
+
+void processCalCommand(String cmd) {
+  cmd.trim();
+  if (cmd == "c" || cmd == "C") {
+    calStage = 1;
+    Serial.println();
+    Serial.println(F("=== LOAD CELL CALIBRATION MODE ==="));
+    Serial.println(F("Step 1: Remove ALL weight from the scale."));
+    Serial.println(F("Step 2: Send the letter: t"));
+  } 
+  else if (cmd == "t" || cmd == "T") {
+    if (calStage >= 1) {
+      Serial.println(F("Taring... waiting for HX711..."));
+      unsigned long timeout = millis() + 3000;
+      while (!scale.is_ready() && millis() < timeout) { delay(10); }
+      
+      if (scale.is_ready()) {
+        scale.tare();
+        calStage = 2;
+        Serial.println(F("Tared OK (zero set)."));
+        Serial.println(F("Step 3: Place your KNOWN weight on the scale (e.g. 160ml water)."));
+        Serial.println(F("Step 4: WAIT 3 SECONDS for it to settle, then send the grams: 160"));
+      } else {
+        Serial.println(F("HX711 not responding! Check DT/SCK wires."));
+        calStage = 0;
+      }
+    }
+  } 
+  else if (cmd == "x" || cmd == "X") {
+    calStage = 0;
+    Serial.println(F("Calibration mode OFF."));
+  } 
+  else if (calStage == 2) {
+    float grams = cmd.toFloat();
+    if (grams <= 1.0) {
+      Serial.println(F("Please send a valid weight in grams bigger than 1, e.g.: 160"));
+    } else {
+      Serial.println(F("Reading scale... hold still for 2 seconds..."));
+      delay(2000); 
+      
+      if (!scale.is_ready()) {
+        scale.power_down();
+        delayMicroseconds(100);
+        scale.power_up();
+        delay(500);
+      }
+
+      if (scale.is_ready()) {
+        long raw = (long)scale.get_value(20);   
+        float newFactor = (float)raw / grams;
+        scale.set_scale(newFactor);
+        Serial.print(F(">>> NEW calibrationFactor = "));
+        Serial.println(newFactor, 2);
+        Serial.println(F(">>> Paste that number into the code (calibrationFactor) and upload to save it forever."));
+        Serial.println(F(">>> Send 'x' when done."));
+        calStage = 3;
+      } else {
+        Serial.println(F("HX711 is frozen. Unplug ESP32, check wires, and try again."));
+      }
+    }
+  }
+}
+
+void handleCalibrationInput() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (calBuffer.length() > 0) {
+        processCalCommand(calBuffer);
+        calBuffer = "";
+      }
+    } else {
+      calBuffer += c;
+      if (calBuffer.length() > 32) calBuffer = "";
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("AUTOBIGAS SYSTEM BOOT");
+  Serial.println("========================================");
+
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(TFT_WHITE);
+
+  pinMode(RELAY_JASMINE, OUTPUT);
+  digitalWrite(RELAY_JASMINE, HIGH);
+  pinMode(RELAY_SINANDOMENG, OUTPUT);
+  digitalWrite(RELAY_SINANDOMENG, HIGH);
+  pinMode(RELAY_DINORADO, OUTPUT);
+  digitalWrite(RELAY_DINORADO, HIGH);
+
+  pinMode(SR_PL, OUTPUT);
+  pinMode(SR_CLK, OUTPUT);
+  pinMode(SR_DATA, INPUT);
+  digitalWrite(SR_PL, HIGH);
+  digitalWrite(SR_CLK, LOW);
+
+  pinMode(TRIG_JASMINE, OUTPUT);
+  pinMode(ECHO_JASMINE, INPUT);
+  pinMode(TRIG_SINANDOMENG, OUTPUT);
+  pinMode(ECHO_SINANDOMENG, INPUT);
+  pinMode(TRIG_DINORADO, OUTPUT);
+  pinMode(ECHO_DINORADO, INPUT);
+
+  scale.begin(HX711_DT, HX711_SCK);
+  unsigned long st = millis();
+  while (!scale.is_ready() && millis() - st < 3000) {
+    delay(100);
+  }
+  if (scale.is_ready()) {
+    scale.set_scale(calibrationFactor);
+    scale.tare();
+  }
+
+  WiFi.softAP(ssid, password);
+  server.on("/", []() {
+    server.send_P(200, "text/html", index_html);
+  });
+  server.on("/sensors", handleSensors);
+  server.begin();
+
+  drawIdleScreen();
+  lastDebounce = millis();
+  Serial.println("SYSTEM READY");
+  Serial.println(F("(Send 'c' in Serial Monitor to calibrate the load cell)"));
+  delay(1000);
+}
+
+void loop() {
+  server.handleClient();
+  handleCalibrationInput();
+
+  if (remoteDispenseRequested && currentState == STATE_IDLE) {
+    remoteDispenseRequested = false;
+    triggerRemoteDispense(remoteCompartment, remoteWeight);
+  }
+
+  uint16_t buttons = readShiftRegister();
+
+  if (buttons != lastButtons) {
+    lastButtons = buttons;
+  }
+
+  if (millis() - lastSRPrint >= 1000) {
+    lastSRPrint = millis();
+    Serial.print("SR Bits (15..0): ");
+    for (int i = 15; i >= 0; i--) Serial.print((buttons >> i) & 1);
+    Serial.print("  |  STATE = ");
+    Serial.println(currentState);
+  }
+
+  // NEW 7-BUTTON MAPPING
+  bool btnJasmine     = (buttons & (1 << 0));
+  bool btnSinandomeng = (buttons & (1 << 1));
+  bool btnDinorado    = (buttons & (1 << 2));
+  bool btnCancel      = (buttons & (1 << 3));   // Cancel/Back
+  bool btnConfirm     = (buttons & (1 << 4));   // Confirm/Dispense
+  bool btnIncrement   = (buttons & (1 << 5));   // Increment (+1kg)
+  bool btnDecrement   = (buttons & (1 << 6));   // Decrement (-1kg)
+
+  switch (currentState) {
+    case STATE_IDLE:
+      checkVarietyButtons(btnJasmine, btnSinandomeng, btnDinorado);
+      break;
+    case STATE_VARIETY_SELECTED:
+      checkWeightButtons(btnIncrement, btnDecrement);
+      checkCancelButton(btnCancel);
+      checkConfirmButton(btnConfirm);
+      break;
+    case STATE_READY:
+      checkCancelButton(btnCancel);
+      checkConfirmButton(btnConfirm);
+      break;
+    default:
+      break;
+  }
+
+  checkUltrasonic();
+  if (currentState == STATE_IDLE) printLoadCellReading();
+}
+
+void handleSensors() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (server.hasArg("dispense") && server.hasArg("weight")) {
+    int compId = server.arg("dispense").toInt();
+    float weight = server.arg("weight").toFloat();
+    if (compId >= 1 && compId <= 3 && weight > 0 && weight <= 10) {
+      float avail = (compId == 1) ? jasmineKg : (compId == 2) ? sinandomengKg : dinoradoKg;
+      if (weight > avail) {
+        server.send(200, "application/json", "{\"status\":\"insufficient_stock\",\"compartment\":" + String(compId) + ",\"available\":" + String(avail, 1) + "}");
+        return;
+      }
+      remoteDispenseRequested = true;
+      remoteCompartment = compId;
+      remoteWeight = weight;
+      server.send(200, "application/json", "{\"status\":\"dispensing\",\"compartment\":" + String(compId) + ",\"weight\":" + String(weight, 1) + "}");
+      return;
+    }
+  }
+  String json = "{\"compartment1\":" + String(jasmineKg, 2) + ",\"compartment2\":" + String(sinandomengKg, 2) + ",\"compartment3\":" + String(dinoradoKg, 2) + "}";
+  server.send(200, "application/json", json);
+}
+
+void triggerRemoteDispense(int compartment, float weightKg) {
+  if (compartment == 1) {
+    selectedVariety = "Jasmine";
+    selectedPricePerKg = PRICE_JASMINE;
+  } else if (compartment == 2) {
+    selectedVariety = "Sinandomeng";
+    selectedPricePerKg = PRICE_SINANDOMENG;
+  } else {
+    selectedVariety = "Dinorado";
+    selectedPricePerKg = PRICE_DINORADO;
+  }
+  selectedKilo = weightKg;
+  currentState = STATE_DISPENSING;
+  dispenseRice();
+}
+
+float getDistanceCM(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  float distance = (duration * 0.0343) / 2.0;
+  if (distance == 0 || distance > 400) distance = 400;
+  return distance;
+}
+
+float distanceToKg(float distance) {
+  if (distance <= BIN_FULL_DISTANCE) return MAX_KG;
+  if (distance >= BIN_EMPTY_DISTANCE) return 0;
+  return ((BIN_EMPTY_DISTANCE - distance) / (BIN_EMPTY_DISTANCE - BIN_FULL_DISTANCE)) * MAX_KG;
+}
+
+void checkUltrasonic() {
+  if (millis() - lastUltrasonicCheck < ultrasonicInterval) return;
+  lastUltrasonicCheck = millis();
+  jasmineKg = distanceToKg(getDistanceCM(TRIG_JASMINE, ECHO_JASMINE));
+  sinandomengKg = distanceToKg(getDistanceCM(TRIG_SINANDOMENG, ECHO_SINANDOMENG));
+  dinoradoKg = distanceToKg(getDistanceCM(TRIG_DINORADO, ECHO_DINORADO));
+}
+
+void printLoadCellReading() {
+  if (millis() - lastLoadCellPrint < loadCellPrintInterval) return;
+  lastLoadCellPrint = millis();
+  loadCellKg = readLoadCellKg();
+
+  if (calStage == 1 || calStage == 2) return;
+
+  Serial.print("Current Weight: ");
+  Serial.print(loadCellKg, 3);
+  Serial.println(" kg");
+}
+
+void checkVarietyButtons(bool bJ, bool bS, bool bD) {
+  if (millis() - lastDebounce < debounceDelay) return;
+  if (bJ && !prevBtnJasmine) {
+    selectedVariety = "Jasmine";
+    selectedPricePerKg = PRICE_JASMINE;
+    selectedKilo = 1;  // Start at 1kg
+    currentState = STATE_VARIETY_SELECTED;
+    lastDebounce = millis();
+    drawVarietySelectedScreen();
+  } else if (bS && !prevBtnSinandomeng) {
+    selectedVariety = "Sinandomeng";
+    selectedPricePerKg = PRICE_SINANDOMENG;
+    selectedKilo = 1;
+    currentState = STATE_VARIETY_SELECTED;
+    lastDebounce = millis();
+    drawVarietySelectedScreen();
+  } else if (bD && !prevBtnDinorado) {
+    selectedVariety = "Dinorado";
+    selectedPricePerKg = PRICE_DINORADO;
+    selectedKilo = 1;
+    currentState = STATE_VARIETY_SELECTED;
+    lastDebounce = millis();
+    drawVarietySelectedScreen();
+  }
+  prevBtnJasmine = bJ;
+  prevBtnSinandomeng = bS;
+  prevBtnDinorado = bD;
+}
+
+void checkWeightButtons(bool bInc, bool bDec) {
+  if (millis() - lastDebounce < debounceDelay) return;
+  bool changed = false;
+  
+  if (bInc && !prevBtnIncrement) {
+    if (selectedKilo < 10.0) {
+      selectedKilo += 1;
+      changed = true;
+    }
+  } else if (bDec && !prevBtnDecrement) {
+    if (selectedKilo > 1.0) {
+      selectedKilo -= 1;
+      changed = true;
+    }
+  }
+  
+  if (changed) {
+    lastDebounce = millis();
+    drawVarietySelectedScreen();
+  }
+  
+  prevBtnIncrement = bInc;
+  prevBtnDecrement = bDec;
+}
+
+void checkCancelButton(bool bCancel) {
+  if (millis() - lastDebounce < debounceDelay) return;
+  
+  if (bCancel && !prevBtnCancel) {
+    lastDebounce = millis();
+    
+    if (currentState == STATE_VARIETY_SELECTED) {
+      // Go back to IDLE
+      selectedVariety = "";
+      selectedKilo = 0;
+      currentState = STATE_IDLE;
+      drawIdleScreen();
+    } else if (currentState == STATE_READY) {
+      // Go back to VARIETY_SELECTED
+      currentState = STATE_VARIETY_SELECTED;
+      drawVarietySelectedScreen();
+    }
+  }
+  prevBtnCancel = bCancel;
+}
+
+void checkConfirmButton(bool bConfirm) {
+  if (millis() - lastDebounce < debounceDelay) return;
+  
+  if (bConfirm && !prevBtnConfirm) {
+    lastDebounce = millis();
+    
+    if (currentState == STATE_VARIETY_SELECTED) {
+      // Move to READY state
+      currentState = STATE_READY;
+      drawReadyScreen();
+    } else if (currentState == STATE_READY) {
+      // Check stock and dispense
+      float avail = stockFor(selectedVariety);
+      if (selectedKilo > avail) {
+        tft.fillRect(15, 210, 450, 80, TFT_WHITE);
+        tft.setTextColor(TFT_RED);
+        tft.setTextSize(2);
+        tft.setCursor(15, 218);
+        tft.print("ERROR: Insufficient Stock!");
+        tft.setCursor(15, 255);
+        tft.print("Only ");
+        tft.print(avail, 1);
+        tft.print("kg available.");
+        delay(2000);
+        drawReadyScreen();
+      } else {
+        currentState = STATE_DISPENSING;
+        dispenseRice();
+      }
+    }
+  }
+  prevBtnConfirm = bConfirm;
+}
+
+void dispenseRice() {
+  drawDispensingScreen();
+  float targetKg = selectedKilo;
+  int relayPin = RELAY_JASMINE;
+  if (selectedVariety == "Sinandomeng") relayPin = RELAY_SINANDOMENG;
+  else if (selectedVariety == "Dinorado") relayPin = RELAY_DINORADO;
+
+  digitalWrite(relayPin, LOW);
+  if (scale.is_ready()) scale.tare();
+
+  float currentKg = 0;
+  unsigned long startTime = millis();
+  lastDispPrint = 0;
+
+  // --- CANCEL BUTTON VARIABLES ---
+  bool cancelRequested = false;
+  uint16_t lastBtnState = readShiftRegister();
+  unsigned long cancelDebounce = 0;
+
+  while (currentKg < targetKg) {
+    server.handleClient();
+
+    // --- CHECK FOR CANCEL BUTTON PRESS ---
+    uint16_t currentBtnState = readShiftRegister();
+    bool bCancel = (currentBtnState & (1 << 3)); // Bit 3 is Cancel
+    
+    // Detect press and start debounce timer
+    if (bCancel && !(lastBtnState & (1 << 3))) {
+      cancelDebounce = millis();
+    }
+    // If held for > 100ms, trigger cancel
+    if (bCancel && cancelDebounce > 0 && (millis() - cancelDebounce > 100)) {
+      cancelRequested = true;
+      break; // Exit the dispensing loop immediately
+    }
+    lastBtnState = currentBtnState;
+    // -------------------------------
+
+    if (!scale.is_ready()) {
+      if (millis() - lastDispPrint >= 200) {
+        lastDispPrint = millis();
+        Serial.println("HX711 BLINDED BY NOISE");
+      }
+    } else {
+      currentKg = readLoadCellKg();
+      if (millis() - lastDispPrint >= 200) {
+        lastDispPrint = millis();
+        Serial.print("Weighing: ");
+        Serial.print(currentKg, 3);
+        Serial.print(" / ");
+        Serial.print(targetKg, 3);
+        Serial.println(" kg");
+      }
+    }
+
+    updateDispensingProgress(currentKg, targetKg);
+    delay(20);
+    if (millis() - startTime > 60000) {
+      break;
+    }
+  }
+  
+  // IMMEDIATELY CUT POWER TO ALL RELAYS
+  digitalWrite(RELAY_JASMINE, HIGH);
+  digitalWrite(RELAY_SINANDOMENG, HIGH);
+  digitalWrite(RELAY_DINORADO, HIGH);
+
+  tft.init();
+  tft.setRotation(1);
+
+  if (cancelRequested) {
+    tft.fillScreen(TFT_WHITE);
+    // Draw a RED header for Cancelled
+    tft.fillRect(0, 0, 480, 60, TFT_RED);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextSize(3);
+    tft.setCursor(15, 18);
+    tft.print("Cancelled");
+    
+    tft.setTextColor(TFT_RED);
+    tft.setTextSize(3);
+    tft.setCursor(100, 150);
+    tft.print("Dispensing");
+    tft.setCursor(120, 190);
+    tft.print("Cancelled!");
+    
+    tft.setTextColor(TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(90, 240);
+    tft.print("Returning to menu...");
+    
+    delay(2000);
+    
+    selectedVariety = "";
+    selectedKilo = 0;
+    selectedPricePerKg = 0;
+    currentState = STATE_IDLE;
+    drawIdleScreen();
+    return;
+  }
+
+  currentState = STATE_DONE;
+  drawDoneScreen();
+  delay(3000);
+  selectedVariety = "";
+  selectedKilo = 0;
+  selectedPricePerKg = 0;
+  currentState = STATE_IDLE;
+  drawIdleScreen();
+}
+
+void drawHeader(const char* t) {
+  tft.fillRect(0, 0, 480, 60, TFT_DARKGREEN);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(3);
+  tft.setCursor(15, 18);
+  tft.print(t);
+}
+
+void drawIdleScreen() {
+  tft.fillScreen(TFT_WHITE);
+  drawHeader("AutoBigas");
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_BLACK);
+  tft.setCursor(15, 75);
+  tft.print("Select a rice variety:");
+  tft.fillRoundRect(15, 105, 140, 50, 6, TFT_YELLOW);
+  tft.drawRoundRect(15, 105, 140, 50, 6, TFT_BLACK);
+  tft.setCursor(35, 115);
+  tft.print("Jasmine");
+  tft.setCursor(35, 135);
+  tft.print("P58.00/kg");
+  tft.fillRoundRect(170, 105, 140, 50, 6, TFT_YELLOW);
+  tft.drawRoundRect(170, 105, 140, 50, 6, TFT_BLACK);
+  tft.setCursor(185, 115);
+  tft.print("Sinandomeng");
+  tft.setCursor(200, 135);
+  tft.print("P52.00/kg");
+  tft.fillRoundRect(325, 105, 140, 50, 6, TFT_YELLOW);
+  tft.drawRoundRect(325, 105, 140, 50, 6, TFT_BLACK);
+  tft.setCursor(345, 115);
+  tft.print("Dinorado");
+  tft.setCursor(355, 135);
+  tft.print("P55.00/kg");
+}
+
+void drawVarietySelectedScreen() {
+  tft.fillScreen(TFT_WHITE);
+  drawHeader("Adjust Weight");
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(15, 83);
+  tft.print("Variety: ");
+  tft.print(selectedVariety);
+  tft.setTextSize(2);
+  tft.setCursor(15, 120);
+  tft.print("Price: P");
+  tft.print(selectedPricePerKg, 2);
+  tft.print("/kg");
+  
+  // Display current weight (FLOAT)
+  tft.setTextSize(4);
+  tft.setCursor(140, 160);
+  tft.setTextColor(TFT_BLUE);
+  tft.print(selectedKilo, 2);
+  tft.setTextSize(2);
+  tft.setCursor(290, 175);
+  tft.setTextColor(TFT_BLACK);
+  tft.print("kg");
+  
+  // Show increment/decrement buttons
+  tft.setTextSize(2);
+  tft.fillRoundRect(30, 210, 100, 50, 6, TFT_LIGHTGREY);
+  tft.drawRoundRect(30, 210, 100, 50, 6, TFT_BLACK);
+  tft.setCursor(60, 225);
+  tft.setTextColor(TFT_BLACK);
+  tft.print("+1kg");
+  
+  tft.fillRoundRect(350, 210, 100, 50, 6, TFT_LIGHTGREY);
+  tft.drawRoundRect(350, 210, 100, 50, 6, TFT_BLACK);
+  tft.setCursor(380, 225);
+  tft.print("-1kg");
+  
+  // Show confirm and cancel buttons
+  tft.fillRoundRect(170, 210, 100, 50, 6, TFT_GREEN);
+  tft.drawRoundRect(170, 210, 100, 50, 6, TFT_BLACK);
+  tft.setCursor(185, 225);
+  tft.setTextColor(TFT_WHITE);
+  tft.print("Confirm");
+  
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_RED);
+  tft.setCursor(15, 280);
+  tft.print("Press CANCEL to go back");
+}
+
+void drawReadyScreen() {
+  tft.fillScreen(TFT_WHITE);
+  drawHeader("Confirm Order");
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(15, 83);
+  tft.print("Variety: ");
+  tft.print(selectedVariety);
+  tft.setCursor(15, 120);
+  tft.print("Weight: ");
+  tft.print(selectedKilo, 2);
+  tft.println(" kg");
+  char ts[25];
+  sprintf(ts, "Total: P%.2f", selectedKilo * selectedPricePerKg);
+  tft.setCursor(15, 158);
+  tft.print(ts);
+  
+  tft.setTextColor(TFT_DARKGREEN);
+  tft.setCursor(15, 218);
+  tft.print("Press CONFIRM to dispense");
+  tft.setTextColor(TFT_RED);
+  tft.setCursor(15, 255);
+  tft.print("Press CANCEL to go back");
+}
+
+void drawDispensingScreen() {
+  tft.fillScreen(TFT_WHITE);
+  drawHeader("Dispensing...");
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(15, 83);
+  tft.print(selectedVariety);
+  tft.print(" - ");
+  tft.print(selectedKilo, 2);
+  tft.println("kg");
+  tft.drawRoundRect(30, 150, 420, 45, 9, TFT_BLACK);
+}
+
+void updateDispensingProgress(float curKg, float tgtKg) {
+  float pct = (tgtKg > 0) ? (curKg / tgtKg) : 0;
+  if (pct > 1) pct = 1;
+  if (pct < 0) pct = 0;
+  tft.fillRect(33, 153, 414, 39, TFT_WHITE);
+  tft.fillRoundRect(33, 153, (int)(414 * pct), 39, 6, TFT_DARKGREEN);
+  tft.fillRect(30, 210, 420, 30, TFT_WHITE);
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(30, 210);
+  char p[16];
+  sprintf(p, "%.3f kg", curKg);
+  tft.print(p);
+}
+
+void drawDoneScreen() {
+  tft.fillScreen(TFT_WHITE);
+  drawHeader("Complete");
+  tft.drawCircle(240, 165, 60, TFT_DARKGREEN);
+  tft.drawLine(210, 165, 233, 192, TFT_DARKGREEN);
+  tft.drawLine(233, 192, 278, 135, TFT_DARKGREEN);
+  tft.drawLine(212, 167, 234, 194, TFT_DARKGREEN);
+  tft.drawLine(234, 194, 279, 137, TFT_DARKGREEN);
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(190, 255);
+  tft.print("Done!");
+}
