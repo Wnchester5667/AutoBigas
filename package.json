@@ -1,0 +1,21 @@
+{
+  "name": "autobigasapp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.0",
+    "electron": "^44.1.0"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/core": "^8.5.0"
+  }
+}
