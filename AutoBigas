@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <HX711.h>
+#include <ESP32Servo.h> 
 
 const char* ssid = "Autobigas.Connect";
 const char* password = "12345678";
@@ -12,9 +13,9 @@ WebServer server(80);
 #define TFT_DC 2
 #define TFT_RST 4
 
-#define RELAY_JASMINE 16
-#define RELAY_SINANDOMENG 14
-#define RELAY_DINORADO 27
+#define SERVO_JASMINE 16
+#define SERVO_SINANDOMENG 14
+#define SERVO_DINORADO 27
 
 #define SR_PL 15
 #define SR_CLK 26
@@ -40,8 +41,15 @@ const float BIN_EMPTY_DISTANCE = 30.0;
 const float BIN_FULL_DISTANCE = 5.0;
 const float MAX_KG = 10.0;
 
+const int HATCH_CLOSED = 0;   
+const int HATCH_OPEN = 90;    
+
 TFT_eSPI tft = TFT_eSPI();
 HX711 scale;
+
+Servo servoJasmine;
+Servo servoSinandomeng;
+Servo servoDinorado;
 
 enum SystemState { STATE_IDLE, STATE_VARIETY_SELECTED, STATE_READY, STATE_DISPENSING, STATE_DONE };
 SystemState currentState = STATE_IDLE;
@@ -96,20 +104,37 @@ const char index_html[] PROGMEM = R"rawliteral(
 <script>const MAX_KG=10.0,DANGER_THRESHOLD=1.0,LOW_THRESHOLD=3.0;const DEPLETION_RATES={"Jasmine":0.5022,"Dinorado":0.3717,"Sinandomeng":0.3007};const ESP_URL="/sensors",REFRESH_INTERVAL=2000;let compartments=[{id:1,name:"Compartment 1",rice:"Jasmine",kg:null},{id:2,name:"Compartment 2",rice:"Sinandomeng",kg:null},{id:3,name:"Compartment 3",rice:"Dinorado",kg:null}];let monitoringTimer=null,demoMode=false,mockData={compartment1:10.0,compartment2:10.0,compartment3:10.0};function setEspStatus(t,s){const b=document.getElementById("espStatus");b.textContent=t;b.className="status-badge badge-"+s}function setFlowStatus(t){document.getElementById("flowStatus").textContent=t}async function requestSensorData(){if(demoMode){handleSensorData(mockData);monitoringTimer=setTimeout(requestSensorData,2000);return}try{const r=await fetch(ESP_URL,{cache:"no-store"});if(!r.ok)throw new Error();const d=await r.json();setEspStatus("Connected","safe");setFlowStatus("Live Data Streaming");handleSensorData(d)}catch(e){setEspStatus("Connecting...","waiting");setFlowStatus("Retrying...")}monitoringTimer=setTimeout(requestSensorData,REFRESH_INTERVAL)}function toggleDemoMode(){demoMode=document.getElementById("demoToggle").checked;if(demoMode)setEspStatus("DEMO MODE","safe");else setEspStatus("Connecting...","waiting")}function simulateRefill(){mockData={compartment1:10.0,compartment2:10.0,compartment3:10.0};if(demoMode)handleSensorData(mockData)}function simulateDrain(c,k){mockData["compartment"+c]=k;if(demoMode)handleSensorData(mockData)}function handleSensorData(d){if("compartment1"in d){updateCompartment(1,d.compartment1);updateCompartment(2,d.compartment2);updateCompartment(3,d.compartment3)}}function updateForecast(id,p){const c=compartments.find(x=>x.id===id);const r=DEPLETION_RATES[c.rice];document.getElementById("forecastWarn"+id).textContent=p>30?Math.round((p-30)/r)+" mins":"Reached!";document.getElementById("forecastCrit"+id).textContent=p>10?Math.round((p-10)/r)+" mins":"Reached!"}async function triggerDispense(id){const w=parseFloat(document.getElementById("dispenseWeight"+id).value);const btn=document.getElementById("dispenseBtn"+id),st=document.getElementById("dispenseStatus"+id);btn.disabled=true;st.textContent="CHECKING STOCK...";st.className="dispense-status dispensing";if(demoMode){mockData["compartment"+id]=Math.max(0,(mockData["compartment"+id]||0)-w);await new Promise(r=>setTimeout(r,2000));handleSensorData(mockData);st.textContent="DONE! ("+w+"kg)";st.className="dispense-status done"}else{try{const r=await fetch(ESP_URL+"?dispense="+id+"&weight="+w,{cache:"no-store"});const d=await r.json();if(d.status==="insufficient_stock"){st.textContent="⚠️ INSUFFICIENT STOCK ("+d.available+"kg left)";st.className="dispense-status error-text"}else{st.textContent="DONE! ("+w+"kg)";st.className="dispense-status done"}}catch(e){st.textContent="Connection Error";st.className="dispense-status error-text"}}setTimeout(()=>{st.textContent="";st.className="dispense-status";btn.disabled=false},4000)}function updateCompartment(id,kg){const c=compartments.find(x=>x.id===id);let s="waiting",kv=0,pv=0;if(kg!==null&&!isNaN(kg)){kv=Math.max(0,Math.min(MAX_KG,Number(kg)));pv=Math.round((kv/MAX_KG)*100);s=kv<=DANGER_THRESHOLD?"danger":kv<=LOW_THRESHOLD?"warning":"safe";c.kg=kv;updateForecast(id,pv)}document.getElementById("compCard"+id).className="comp-card "+s;document.getElementById("tank"+id).className="tank "+s;document.getElementById("tankFill"+id).style.height=pv+"%";document.getElementById("weight"+id).textContent=kv.toFixed(1);const pEl=document.getElementById("percent"+id);pEl.textContent=pv+"% Full";pEl.style.color=s==="safe"?"#2ecc71":s==="warning"?"#f39c12":s==="danger"?"#e74c3c":"#95a5a6";const b=document.getElementById("statusBadge"+id);b.textContent=s==="safe"?"SAFE":s==="warning"?"LOW":s==="danger"?"CRITICAL":"WAITING";b.className="status-badge badge-"+s}requestSensorData();</script></body></html>
 )rawliteral";
 
+// --- NOISE CANCELING SHIFT REGISTER READ ---
 uint16_t readShiftRegister() {
-  digitalWrite(SR_PL, LOW);
-  delayMicroseconds(10);
-  digitalWrite(SR_PL, HIGH);
-  delayMicroseconds(10);
-  uint16_t data = 0;
-  for (int i = 0; i < 8; i++) {   // ONE chip now = 8 bits
-    digitalWrite(SR_CLK, LOW);
-    delayMicroseconds(5);
-    data = (data << 1) | digitalRead(SR_DATA);
-    digitalWrite(SR_CLK, HIGH);
-    delayMicroseconds(5);
+  uint16_t v1 = 0, v2 = 0, v3 = 0;
+
+  // Read 1
+  digitalWrite(SR_PL, LOW); delayMicroseconds(10); digitalWrite(SR_PL, HIGH); delayMicroseconds(10);
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(SR_CLK, LOW); delayMicroseconds(5);
+    v1 = (v1 << 1) | digitalRead(SR_DATA);
+    digitalWrite(SR_CLK, HIGH); delayMicroseconds(5);
   }
-  return data;
+
+  // Read 2
+  digitalWrite(SR_PL, LOW); delayMicroseconds(10); digitalWrite(SR_PL, HIGH); delayMicroseconds(10);
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(SR_CLK, LOW); delayMicroseconds(5);
+    v2 = (v2 << 1) | digitalRead(SR_DATA);
+    digitalWrite(SR_CLK, HIGH); delayMicroseconds(5);
+  }
+
+  // Read 3
+  digitalWrite(SR_PL, LOW); delayMicroseconds(10); digitalWrite(SR_PL, HIGH); delayMicroseconds(10);
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(SR_CLK, LOW); delayMicroseconds(5);
+    v3 = (v3 << 1) | digitalRead(SR_DATA);
+    digitalWrite(SR_CLK, HIGH); delayMicroseconds(5);
+  }
+
+  // Bitwise Majority Vote: A bit only becomes 1 if it was 1 in at least 2 of the 3 reads.
+  // This mathematically deletes random electrical noise (EMI) from the servos!
+  return (v1 & v2) | (v2 & v3) | (v3 & v1);
 }
 
 float stockFor(String v) {
@@ -244,15 +269,21 @@ void setup() {
   Serial.println("========================================");
 
   tft.init();
-  tft.setRotation(1);
+  tft.setRotation(3); // CHANGED TO 3 FOR LANDSCAPE (Try 2 if upside down)
   tft.fillScreen(TFT_WHITE);
 
-  pinMode(RELAY_JASMINE, OUTPUT);
-  digitalWrite(RELAY_JASMINE, HIGH);
-  pinMode(RELAY_SINANDOMENG, OUTPUT);
-  digitalWrite(RELAY_SINANDOMENG, HIGH);
-  pinMode(RELAY_DINORADO, OUTPUT);
-  digitalWrite(RELAY_DINORADO, HIGH);
+  // SAFETY FIRST: Prevent parasitic power drain on servos during boot/upload
+  pinMode(SERVO_JASMINE, OUTPUT); digitalWrite(SERVO_JASMINE, LOW);
+  pinMode(SERVO_SINANDOMENG, OUTPUT); digitalWrite(SERVO_SINANDOMENG, LOW);
+  pinMode(SERVO_DINORADO, OUTPUT); digitalWrite(SERVO_DINORADO, LOW);
+
+  servoJasmine.attach(SERVO_JASMINE);
+  servoSinandomeng.attach(SERVO_SINANDOMENG);
+  servoDinorado.attach(SERVO_DINORADO);
+
+  servoJasmine.write(HATCH_CLOSED);
+  servoSinandomeng.write(HATCH_CLOSED);
+  servoDinorado.write(HATCH_CLOSED);
 
   pinMode(SR_PL, OUTPUT);
   pinMode(SR_CLK, OUTPUT);
@@ -314,14 +345,13 @@ void loop() {
     Serial.println(currentState);
   }
 
-  // NEW 7-BUTTON MAPPING
   bool btnJasmine     = (buttons & (1 << 0));
   bool btnSinandomeng = (buttons & (1 << 1));
   bool btnDinorado    = (buttons & (1 << 2));
-  bool btnCancel      = (buttons & (1 << 3));   // Cancel/Back
-  bool btnConfirm     = (buttons & (1 << 4));   // Confirm/Dispense
-  bool btnIncrement   = (buttons & (1 << 5));   // Increment (+1kg)
-  bool btnDecrement   = (buttons & (1 << 6));   // Decrement (-1kg)
+  bool btnCancel      = (buttons & (1 << 3));   
+  bool btnConfirm     = (buttons & (1 << 4));   
+  bool btnIncrement   = (buttons & (1 << 5));   
+  bool btnDecrement   = (buttons & (1 << 6));   
 
   switch (currentState) {
     case STATE_IDLE:
@@ -425,7 +455,7 @@ void checkVarietyButtons(bool bJ, bool bS, bool bD) {
   if (bJ && !prevBtnJasmine) {
     selectedVariety = "Jasmine";
     selectedPricePerKg = PRICE_JASMINE;
-    selectedKilo = 1;  // Start at 1kg
+    selectedKilo = 1;  
     currentState = STATE_VARIETY_SELECTED;
     lastDebounce = millis();
     drawVarietySelectedScreen();
@@ -481,13 +511,11 @@ void checkCancelButton(bool bCancel) {
     lastDebounce = millis();
     
     if (currentState == STATE_VARIETY_SELECTED) {
-      // Go back to IDLE
       selectedVariety = "";
       selectedKilo = 0;
       currentState = STATE_IDLE;
       drawIdleScreen();
     } else if (currentState == STATE_READY) {
-      // Go back to VARIETY_SELECTED
       currentState = STATE_VARIETY_SELECTED;
       drawVarietySelectedScreen();
     }
@@ -502,11 +530,9 @@ void checkConfirmButton(bool bConfirm) {
     lastDebounce = millis();
     
     if (currentState == STATE_VARIETY_SELECTED) {
-      // Move to READY state
       currentState = STATE_READY;
       drawReadyScreen();
     } else if (currentState == STATE_READY) {
-      // Check stock and dispense
       float avail = stockFor(selectedVariety);
       if (selectedKilo > avail) {
         tft.fillRect(15, 210, 450, 80, TFT_WHITE);
@@ -532,18 +558,19 @@ void checkConfirmButton(bool bConfirm) {
 void dispenseRice() {
   drawDispensingScreen();
   float targetKg = selectedKilo;
-  int relayPin = RELAY_JASMINE;
-  if (selectedVariety == "Sinandomeng") relayPin = RELAY_SINANDOMENG;
-  else if (selectedVariety == "Dinorado") relayPin = RELAY_DINORADO;
+  
+  Servo* activeServo = &servoJasmine;
+  if (selectedVariety == "Sinandomeng") activeServo = &servoSinandomeng;
+  else if (selectedVariety == "Dinorado") activeServo = &servoDinorado;
 
-  digitalWrite(relayPin, LOW);
+  activeServo->write(HATCH_OPEN); 
+  
   if (scale.is_ready()) scale.tare();
 
   float currentKg = 0;
   unsigned long startTime = millis();
   lastDispPrint = 0;
 
-  // --- CANCEL BUTTON VARIABLES ---
   bool cancelRequested = false;
   uint16_t lastBtnState = readShiftRegister();
   unsigned long cancelDebounce = 0;
@@ -551,21 +578,17 @@ void dispenseRice() {
   while (currentKg < targetKg) {
     server.handleClient();
 
-    // --- CHECK FOR CANCEL BUTTON PRESS ---
     uint16_t currentBtnState = readShiftRegister();
-    bool bCancel = (currentBtnState & (1 << 3)); // Bit 3 is Cancel
+    bool bCancel = (currentBtnState & (1 << 3)); 
     
-    // Detect press and start debounce timer
     if (bCancel && !(lastBtnState & (1 << 3))) {
       cancelDebounce = millis();
     }
-    // If held for > 100ms, trigger cancel
     if (bCancel && cancelDebounce > 0 && (millis() - cancelDebounce > 100)) {
       cancelRequested = true;
-      break; // Exit the dispensing loop immediately
+      break; 
     }
     lastBtnState = currentBtnState;
-    // -------------------------------
 
     if (!scale.is_ready()) {
       if (millis() - lastDispPrint >= 200) {
@@ -591,17 +614,13 @@ void dispenseRice() {
     }
   }
   
-  // IMMEDIATELY CUT POWER TO ALL RELAYS
-  digitalWrite(RELAY_JASMINE, HIGH);
-  digitalWrite(RELAY_SINANDOMENG, HIGH);
-  digitalWrite(RELAY_DINORADO, HIGH);
+  activeServo->write(HATCH_CLOSED); 
 
   tft.init();
-  tft.setRotation(1);
+  tft.setRotation(3); // CHANGED TO 3 FOR LANDSCAPE
 
   if (cancelRequested) {
     tft.fillScreen(TFT_WHITE);
-    // Draw a RED header for Cancelled
     tft.fillRect(0, 0, 480, 60, TFT_RED);
     tft.setTextColor(TFT_WHITE);
     tft.setTextSize(3);
@@ -689,7 +708,6 @@ void drawVarietySelectedScreen() {
   tft.print(selectedPricePerKg, 2);
   tft.print("/kg");
   
-  // Display current weight (FLOAT)
   tft.setTextSize(4);
   tft.setCursor(140, 160);
   tft.setTextColor(TFT_BLUE);
@@ -699,7 +717,6 @@ void drawVarietySelectedScreen() {
   tft.setTextColor(TFT_BLACK);
   tft.print("kg");
   
-  // Show increment/decrement buttons
   tft.setTextSize(2);
   tft.fillRoundRect(30, 210, 100, 50, 6, TFT_LIGHTGREY);
   tft.drawRoundRect(30, 210, 100, 50, 6, TFT_BLACK);
@@ -712,7 +729,6 @@ void drawVarietySelectedScreen() {
   tft.setCursor(380, 225);
   tft.print("-1kg");
   
-  // Show confirm and cancel buttons
   tft.fillRoundRect(170, 210, 100, 50, 6, TFT_GREEN);
   tft.drawRoundRect(170, 210, 100, 50, 6, TFT_BLACK);
   tft.setCursor(185, 225);
