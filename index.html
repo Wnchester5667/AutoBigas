@@ -125,12 +125,7 @@
                         <strong>Sensor Report:</strong> <span id="report1">Waiting for ESP32 data.</span>
                     </div>
                     <div class="dispense-controls">
-                        <select class="dispense-select" id="dispenseWeight1">
-                            <option value="1">1 kg</option><option value="2">2 kg</option><option value="3">3 kg</option>
-                            <option value="4">4 kg</option><option value="5">5 kg</option><option value="6">6 kg</option>
-                            <option value="7">7 kg</option><option value="8">8 kg</option><option value="9">9 kg</option>
-                            <option value="10">10 kg</option>
-                        </select>
+                        <input type="number" class="dispense-select" id="dispenseWeight1" min="0.1" max="10" step="0.1" value="1.0" placeholder="kg">
                         <button class="btn-dispense" id="dispenseBtn1" onclick="triggerDispense(1)">🔄 Dispense</button>
                     </div>
                     <div class="dispense-status" id="dispenseStatus1"></div>
@@ -162,12 +157,7 @@
                         <strong>Sensor Report:</strong> <span id="report2">Waiting for ESP32 data.</span>
                     </div>
                     <div class="dispense-controls">
-                        <select class="dispense-select" id="dispenseWeight2">
-                            <option value="1">1 kg</option><option value="2">2 kg</option><option value="3">3 kg</option>
-                            <option value="4">4 kg</option><option value="5">5 kg</option><option value="6">6 kg</option>
-                            <option value="7">7 kg</option><option value="8">8 kg</option><option value="9">9 kg</option>
-                            <option value="10">10 kg</option>
-                        </select>
+                        <input type="number" class="dispense-select" id="dispenseWeight2" min="0.1" max="10" step="0.1" value="1.0" placeholder="kg">
                         <button class="btn-dispense" id="dispenseBtn2" onclick="triggerDispense(2)">🔄 Dispense</button>
                     </div>
                     <div class="dispense-status" id="dispenseStatus2"></div>
@@ -199,12 +189,7 @@
                         <strong>Sensor Report:</strong> <span id="report3">Waiting for ESP32 data.</span>
                     </div>
                     <div class="dispense-controls">
-                        <select class="dispense-select" id="dispenseWeight3">
-                            <option value="1">1 kg</option><option value="2">2 kg</option><option value="3">3 kg</option>
-                            <option value="4">4 kg</option><option value="5">5 kg</option><option value="6">6 kg</option>
-                            <option value="7">7 kg</option><option value="8">8 kg</option><option value="9">9 kg</option>
-                            <option value="10">10 kg</option>
-                        </select>
+                        <input type="number" class="dispense-select" id="dispenseWeight3" min="0.1" max="10" step="0.1" value="1.0" placeholder="kg">
                         <button class="btn-dispense" id="dispenseBtn3" onclick="triggerDispense(3)">🔄 Dispense</button>
                     </div>
                     <div class="dispense-status" id="dispenseStatus3"></div>
@@ -383,13 +368,30 @@
         }
     }
 
-    // ---------- REMOTE DISPENSE (1-10 kg) ----------
+    // ---------- REMOTE DISPENSE (DECIMAL WEIGHTS) ----------
     async function triggerDispense(id) {
-        const selectEl = document.getElementById("dispenseWeight" + id);
-        const weight = parseFloat(selectEl.value);
+        const inputEl = document.getElementById("dispenseWeight" + id);
+        let weight = parseFloat(inputEl.value);
         const btn = document.getElementById("dispenseBtn" + id);
         const statusEl = document.getElementById("dispenseStatus" + id);
         const comp = compartments.find(c => c.id === id);
+
+        // Validate input (prevent 0, negative, or empty values)
+        if (isNaN(weight) || weight <= 0) {
+            statusEl.textContent = "⚠️ Enter a valid weight (e.g., 1.5)";
+            statusEl.className = "dispense-status error-text";
+            setTimeout(() => { statusEl.textContent = ""; statusEl.className = "dispense-status"; }, 3000);
+            return;
+        }
+
+        // Cap at 10kg max
+        if (weight > MAX_KG) {
+            weight = MAX_KG;
+            inputEl.value = MAX_KG;
+        }
+        
+        // Round to 2 decimal places to avoid floating point URL glitches
+        weight = Math.round(weight * 100) / 100;
 
         if (dispensing) {
             statusEl.textContent = "⚠️ Dispenser is busy, wait a moment";
@@ -407,12 +409,12 @@
         }
 
         btn.disabled = true;
-        statusEl.textContent = "DISPENSING " + weight + "kg...";
+        statusEl.textContent = "DISPENSING " + weight.toFixed(2) + "kg...";
         statusEl.className = "dispense-status dispensing";
 
         const ok = await sendDispense(id, weight);
         if (ok) {
-            statusEl.textContent = "DONE! (" + weight + "kg Dispensed)";
+            statusEl.textContent = "DONE! (" + weight.toFixed(2) + "kg Dispensed)";
             statusEl.className = "dispense-status done";
         } else {
             statusEl.textContent = "⚠️ No confirmation from dispenser. Check the unit.";
