@@ -40,6 +40,7 @@ float calibrationFactor = 215.23;
 const float BIN_EMPTY_DISTANCE = 30.0;
 const float BIN_FULL_DISTANCE = 5.0;
 const float MAX_KG = 10.0;
+const float MAX_DISPENSE_KG = 5.0;
 
 const int HATCH_CLOSED = 0;   
 const int HATCH_OPEN = 90;    
@@ -237,7 +238,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                         <strong>Sensor Report:</strong> <span id="report1">Waiting for ESP32 data.</span>
                     </div>
                     <div class="dispense-controls">
-                        <input type="number" class="dispense-select" id="dispenseWeight1" min="0.1" max="10" step="0.1" value="1.0" placeholder="kg">
+                        <input type="number" class="dispense-select" id="dispenseWeight1" min="0.1" max="5" step="0.1" value="1.0" placeholder="kg">
                         <button class="btn-dispense" id="dispenseBtn1" onclick="triggerDispense(1)">🔄 Dispense</button>
                     </div>
                     <div class="dispense-status" id="dispenseStatus1"></div>
@@ -267,7 +268,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                         <strong>Sensor Report:</strong> <span id="report2">Waiting for ESP32 data.</span>
                     </div>
                     <div class="dispense-controls">
-                        <input type="number" class="dispense-select" id="dispenseWeight2" min="0.1" max="10" step="0.1" value="1.0" placeholder="kg">
+                        <input type="number" class="dispense-select" id="dispenseWeight2" min="0.1" max="5" step="0.1" value="1.0" placeholder="kg">
                         <button class="btn-dispense" id="dispenseBtn2" onclick="triggerDispense(2)">🔄 Dispense</button>
                     </div>
                     <div class="dispense-status" id="dispenseStatus2"></div>
@@ -297,7 +298,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                         <strong>Sensor Report:</strong> <span id="report3">Waiting for ESP32 data.</span>
                     </div>
                     <div class="dispense-controls">
-                        <input type="number" class="dispense-select" id="dispenseWeight3" min="0.1" max="10" step="0.1" value="1.0" placeholder="kg">
+                        <input type="number" class="dispense-select" id="dispenseWeight3" min="0.1" max="5" step="0.1" value="1.0" placeholder="kg">
                         <button class="btn-dispense" id="dispenseBtn3" onclick="triggerDispense(3)">🔄 Dispense</button>
                     </div>
                     <div class="dispense-status" id="dispenseStatus3"></div>
@@ -319,6 +320,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <script>
         const ESP_URL_KEY = "autobigas_esp32_url";
         const MAX_KG = 10.0;
+        const MAX_DISPENSE_KG = 5.0;
         const DANGER_THRESHOLD = 1.0;
         const LOW_THRESHOLD = 3.0;
         const PRICES = { "Jasmine": 58.0, "Sinandomeng": 52.0, "Dinorado": 55.0 };
@@ -430,7 +432,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                 statusEl.textContent = "⚠️ Enter a valid weight (e.g., 1.5)"; statusEl.className = "dispense-status error-text";
                 setTimeout(() => { statusEl.textContent = ""; statusEl.className = "dispense-status"; }, 3000); return;
             }
-            if (weight > MAX_KG) { weight = MAX_KG; inputEl.value = MAX_KG; }
+            if (weight > MAX_DISPENSE_KG) { weight = MAX_DISPENSE_KG; inputEl.value = MAX_DISPENSE_KG; }
             weight = Math.round(weight * 100) / 100;
             if (dispensing) {
                 statusEl.textContent = "⚠️ Dispenser is busy, wait a moment"; statusEl.className = "dispense-status error-text";
@@ -485,7 +487,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             }
             const price = PRICES[comp.rice];
             let kg = Math.floor((money / price) * 100) / 100;
-            if (kg > MAX_KG) kg = MAX_KG;
+            if (kg > MAX_DISPENSE_KG) kg = MAX_DISPENSE_KG;
             if (kg <= 0) {
                 statusEl.textContent = "⚠️ Budget too small (min ₱" + price + ")"; statusEl.className = "dispense-status error-text";
                 setTimeout(() => { statusEl.textContent = ""; statusEl.className = "dispense-status"; }, 3000); return;
@@ -692,8 +694,6 @@ float readLoadCellKg() {
       return lastGoodKg; 
   }
 
-  // FIX: get_units(1) instead of get_units(10). 
-  // 10 readings blocked the ESP32 for 1 full second, causing boot errors and WiFi timeouts!
   float grams = scale.get_units(1); 
   if (grams < 0) grams = 0;
   float currentKg = grams / 1000.0;
@@ -764,7 +764,7 @@ void handleSensors() {
       return;
     }
     int compId = server.arg("dispense").toInt(); float weight = server.arg("weight").toFloat();
-    if (compId >= 1 && compId <= 3 && weight > 0 && weight <= 10) {
+    if (compId >= 1 && compId <= 3 && weight > 0 && weight <= MAX_DISPENSE_KG) {
       float avail = (compId == 1) ? jasmineKg : (compId == 2) ? sinandomengKg : dinoradoKg;
       if (avail < 0) avail = 0; 
       if (weight > avail) { server.send(200, "application/json", "{\"status\":\"insufficient_stock\",\"compartment\":" + String(compId) + ",\"available\":" + String(avail, 1) + "}"); return; }
@@ -865,7 +865,7 @@ void checkVarietyButtons(bool bJ, bool bS, bool bD) {
 void checkWeightButtons(bool bInc, bool bDec) {
   if (millis() - lastDebounce < debounceDelay) return;
   bool changed = false;
-  if (bInc && !prevBtnIncrement) { if (selectedKilo < 10.0) { selectedKilo += 1; changed = true; } } 
+  if (bInc && !prevBtnIncrement) { if (selectedKilo < MAX_DISPENSE_KG) { selectedKilo += 1; changed = true; } } 
   else if (bDec && !prevBtnDecrement) { if (selectedKilo > 1.0) { selectedKilo -= 1; changed = true; } }
   if (changed) { lastDebounce = millis(); drawVarietySelectedScreen(); }
   prevBtnIncrement = bInc; prevBtnDecrement = bDec;
@@ -1003,11 +1003,10 @@ void setup() {
   
   scale.begin(HX711_DT, HX711_SCK);
   
-  // --- CRITICAL BOOT FIX: Force a clean wake-up state for the HX711 chip ---
   scale.power_down(); 
   delay(10);
   scale.power_up();
-  delay(200); // Give the chip 200ms to complete its very first conversion
+  delay(200);
 
   unsigned long st = millis(); 
   while (!scale.is_ready() && millis() - st < 3000) { 
