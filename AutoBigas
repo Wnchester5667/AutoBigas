@@ -35,7 +35,7 @@ const float PRICE_JASMINE = 58.0;
 const float PRICE_SINANDOMENG = 52.0;
 const float PRICE_DINORADO = 55.0;
 
-float calibrationFactor = 163.11; 
+float calibrationFactor = 238.51; 
 
 const float BIN_EMPTY_DISTANCE = 35.9;
 const float BIN_FULL_DISTANCE = 5.0;
@@ -900,44 +900,183 @@ void checkConfirmButton(bool bConfirm) {
   prevBtnConfirm = bConfirm;
 }
 
+// ========================================================================
+// DISPENSING: PHYSICALLY ACCURATE FIXED-MASS BUFFERS
+// ========================================================================
 void dispenseRice() {
-  drawDispensingScreen(); float targetKg = selectedKilo;
+  drawDispensingScreen(); 
+  float targetKg = selectedKilo;
+  
   Servo* activeServo = &servoJasmine;
   int openAngle = HATCH_OPEN_JASMINE;
-  if (selectedVariety == "Sinandomeng") { activeServo = &servoSinandomeng; openAngle = HATCH_OPEN_SINANDOMENG; }
-  else if (selectedVariety == "Dinorado") { activeServo = &servoDinorado; openAngle = HATCH_OPEN_DINORADO; }
+  if (selectedVariety == "Sinandomeng") { 
+    activeServo = &servoSinandomeng; 
+    openAngle = HATCH_OPEN_SINANDOMENG; 
+  } else if (selectedVariety == "Dinorado") { 
+    activeServo = &servoDinorado; 
+    openAngle = HATCH_OPEN_DINORADO; 
+  }
+  
+  // Trickle angle for fine control (40% of full open)
+  int trickleAngle = openAngle * 0.4;
+  if (trickleAngle < 15) trickleAngle = 15; 
+
   activeServo->write(openAngle); 
   if (scale.is_ready()) scale.tare();
-  float currentKg = 0; unsigned long startTime = millis(); lastDispPrint = 0;
-  bool cancelRequested = false; uint16_t lastBtnState = readShiftRegister(); unsigned long cancelDebounce = 0;
+  
+  float currentKg = 0; 
+  unsigned long startTime = millis(); 
+  lastDispPrint = 0;
+  bool cancelRequested = false; 
+  uint16_t lastBtnState = readShiftRegister(); 
+  unsigned long cancelDebounce = 0;
 
-  while (currentKg < targetKg) {
+  // Calculate the fast-pour stop point. 
+  // Based on your 1.19kg result (850g stop + 340g in-flight), the free-fall rice is ~340g.
+  // We use a fixed 380g buffer to guarantee we NEVER overshoot.
+  float fastTarget = targetKg - 0.380;
+  if (fastTarget < 0.100) fastTarget = 0.100; 
+
+  // --- PHASE 1: Fast Pour ---
+  Serial.print("Phase 1: Fast pour to "); Serial.print(fastTarget, 3); Serial.println(" kg");
+
+  while (currentKg < fastTarget) {
     server.handleClient();
-    uint16_t currentBtnState = readShiftRegister(); bool bCancel = (currentBtnState & (1 << 3)); 
+    uint16_t currentBtnState = readShiftRegister(); 
+    bool bCancel = (currentBtnState & (1 << 3)); 
     if (bCancel && !(lastBtnState & (1 << 3))) { cancelDebounce = millis(); }
     if (bCancel && cancelDebounce > 0 && (millis() - cancelDebounce > 100)) { cancelRequested = true; break; }
     lastBtnState = currentBtnState;
 
-    if (!scale.is_ready()) { if (millis() - lastDispPrint >= 200) { lastDispPrint = millis(); Serial.println("HX711 BLINDED BY NOISE"); } } 
-    else {
+    if (!scale.is_ready()) { 
+      if (millis() - lastDispPrint >= 200) { lastDispPrint = millis(); Serial.println("HX711 BLINDED BY NOISE"); } 
+    } else {
       currentKg = readLoadCellKg();
-      if (millis() - lastDispPrint >= 200) { lastDispPrint = millis(); Serial.print("Weighing: "); Serial.print(currentKg, 3); Serial.print(" / "); Serial.print(targetKg, 3); Serial.println(" kg"); }
+      if (millis() - lastDispPrint >= 200) { 
+        lastDispPrint = millis(); 
+        Serial.print("Phase 1 Weighing: "); Serial.print(currentKg, 3); Serial.print(" / "); Serial.print(fastTarget, 3); Serial.println(" kg"); 
+      }
     }
-    updateDispensingProgress(currentKg, targetKg); delay(20);
+    updateDispensingProgress(currentKg, targetKg); 
+    delay(20);
     if (millis() - startTime > 60000) break;
   }
-  activeServo->write(HATCH_CLOSED); 
-  tft.init(); tft.setRotation(3); 
-
+  
+  activeServo->write(HATCH_CLOSED);
+  
   if (cancelRequested) {
+    tft.init(); tft.setRotation(3); 
     tft.fillScreen(TFT_WHITE); tft.fillRect(0, 0, 480, 60, TFT_RED); tft.setTextColor(TFT_WHITE); tft.setTextSize(3); tft.setCursor(15, 18); tft.print("Cancelled");
     tft.setTextColor(TFT_RED); tft.setTextSize(3); tft.setCursor(100, 150); tft.print("Dispensing"); tft.setCursor(120, 190); tft.print("Cancelled!");
     tft.setTextColor(TFT_BLACK); tft.setTextSize(2); tft.setCursor(90, 240); tft.print("Returning to menu...");
     delay(2000); selectedVariety = ""; selectedKilo = 0; selectedPricePerKg = 0; currentState = STATE_IDLE; drawIdleScreen(); return;
   }
 
-  currentState = STATE_DONE; drawDoneScreen(); delay(3000);
-  selectedVariety = ""; selectedKilo = 0; selectedPricePerKg = 0; currentState = STATE_IDLE; drawIdleScreen();
+  // --- PHASE 2: Wait for in-flight rice to settle ---
+  Serial.println("Phase 2: Settling...");
+  delay(1500); 
+  if (scale.is_ready()) {
+    currentKg = readLoadCellKg();
+    Serial.print("Settled after Phase 1: "); Serial.println(currentKg, 3);
+  }
+
+  // --- PHASE 3: Trickle Pour ---
+  // Trickle flow is slower, so in-flight rice is smaller. We use a fixed 50g buffer.
+  float trickleTarget = targetKg - 0.050;
+  if (trickleTarget < fastTarget) trickleTarget = fastTarget;
+
+  if (currentKg < trickleTarget) {
+    Serial.print("Phase 3: Trickle to "); Serial.print(trickleTarget, 3); Serial.println(" kg");
+    activeServo->write(trickleAngle);
+    
+    while (currentKg < trickleTarget) {
+      server.handleClient();
+      uint16_t currentBtnState = readShiftRegister(); 
+      bool bCancel = (currentBtnState & (1 << 3)); 
+      if (bCancel && !(lastBtnState & (1 << 3))) { cancelDebounce = millis(); }
+      if (bCancel && cancelDebounce > 0 && (millis() - cancelDebounce > 100)) { cancelRequested = true; break; }
+      lastBtnState = currentBtnState;
+
+      if (scale.is_ready()) {
+        currentKg = readLoadCellKg();
+        if (millis() - lastDispPrint >= 200) { 
+          lastDispPrint = millis(); 
+          Serial.print("Phase 3 Weighing: "); Serial.print(currentKg, 3); Serial.print(" / "); Serial.print(trickleTarget, 3); Serial.println(" kg"); 
+        }
+      }
+      updateDispensingProgress(currentKg, targetKg); 
+      delay(30);
+      if (millis() - startTime > 60000) break;
+    }
+    activeServo->write(HATCH_CLOSED);
+    
+    if (cancelRequested) {
+      tft.init(); tft.setRotation(3); 
+      tft.fillScreen(TFT_WHITE); tft.fillRect(0, 0, 480, 60, TFT_RED); tft.setTextColor(TFT_WHITE); tft.setTextSize(3); tft.setCursor(15, 18); tft.print("Cancelled");
+      tft.setTextColor(TFT_RED); tft.setTextSize(3); tft.setCursor(100, 150); tft.print("Dispensing"); tft.setCursor(120, 190); tft.print("Cancelled!");
+      tft.setTextColor(TFT_BLACK); tft.setTextSize(2); tft.setCursor(90, 240); tft.print("Returning to menu...");
+      delay(2000); selectedVariety = ""; selectedKilo = 0; selectedPricePerKg = 0; currentState = STATE_IDLE; drawIdleScreen(); return;
+    }
+    
+    // Settle again
+    delay(1000);
+    if (scale.is_ready()) {
+      currentKg = readLoadCellKg();
+      Serial.print("Settled after Phase 3: "); Serial.println(currentKg, 3);
+    }
+  }
+
+  // --- PHASE 4: Pulse Top-Up ---
+  int topUpAttempts = 0;
+  while (currentKg < (targetKg - 0.005) && topUpAttempts < 15) {
+    Serial.print("Phase 4: Top-up attempt "); Serial.println(topUpAttempts + 1);
+    
+    server.handleClient(); // Keep WiFi alive during long top-ups
+    uint16_t currentBtnState = readShiftRegister(); 
+    bool bCancel = (currentBtnState & (1 << 3)); 
+    if (bCancel && !(lastBtnState & (1 << 3))) { cancelDebounce = millis(); }
+    if (bCancel && cancelDebounce > 0 && (millis() - cancelDebounce > 100)) { cancelRequested = true; break; }
+    lastBtnState = currentBtnState;
+
+    // Pulse open for a short burst
+    activeServo->write(trickleAngle);
+    delay(150); // 150ms burst
+    activeServo->write(HATCH_CLOSED);
+    
+    // Wait for it to fall and settle completely
+    delay(800); 
+    
+    if (scale.is_ready()) {
+      currentKg = readLoadCellKg();
+      Serial.print("Settled after pulse: "); Serial.println(currentKg, 3);
+      updateDispensingProgress(currentKg, targetKg);
+    }
+    
+    topUpAttempts++;
+    if (millis() - startTime > 60000) break;
+  }
+  
+  if (cancelRequested) {
+    tft.init(); tft.setRotation(3); 
+    tft.fillScreen(TFT_WHITE); tft.fillRect(0, 0, 480, 60, TFT_RED); tft.setTextColor(TFT_WHITE); tft.setTextSize(3); tft.setCursor(15, 18); tft.print("Cancelled");
+    tft.setTextColor(TFT_RED); tft.setTextSize(3); tft.setCursor(100, 150); tft.print("Dispensing"); tft.setCursor(120, 190); tft.print("Cancelled!");
+    tft.setTextColor(TFT_BLACK); tft.setTextSize(2); tft.setCursor(90, 240); tft.print("Returning to menu...");
+    delay(2000); selectedVariety = ""; selectedKilo = 0; selectedPricePerKg = 0; currentState = STATE_IDLE; drawIdleScreen(); return;
+  }
+
+  // --- Finalize ---
+  tft.init(); tft.setRotation(3); 
+  if (scale.is_ready()) {
+    currentKg = readLoadCellKg();
+    Serial.print("Final weight: "); Serial.print(currentKg, 3); Serial.print(" kg (target: "); Serial.print(targetKg, 3); Serial.println(" kg)");
+  }
+
+  currentState = STATE_DONE; 
+  drawDoneScreen(); 
+  delay(3000);
+  selectedVariety = ""; selectedKilo = 0; selectedPricePerKg = 0; 
+  currentState = STATE_IDLE; 
+  drawIdleScreen();
 }
 
 void drawHeader(const char* t) { tft.fillRect(0, 0, 480, 60, TFT_DARKGREEN); tft.setTextColor(TFT_WHITE); tft.setTextSize(3); tft.setCursor(15, 18); tft.print(t); }
