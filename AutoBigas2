@@ -43,8 +43,7 @@ const float MAX_KG = 6.16;
 const float MAX_DISPENSE_KG = 5.0;
 
 const int HATCH_CLOSED = 0;
-// Adjusted Jasmine from 66 down to 54 to match the flow rate of Sinandomeng/Dinorado
-const int HATCH_OPEN_JASMINE = 54; 
+const int HATCH_OPEN_JASMINE = 54;
 const int HATCH_OPEN_SINANDOMENG = 50;
 const int HATCH_OPEN_DINORADO = 48;
 
@@ -918,7 +917,7 @@ void dispenseRice() {
     openAngle = HATCH_OPEN_DINORADO; 
   }
   
-  // Medium angle (75% open). Automatically scales down because we lowered the main openAngle!
+  // Medium angle (75% open).
   int mediumAngle = openAngle * 0.75;
   if (mediumAngle < 20) mediumAngle = 20; 
 
@@ -932,6 +931,9 @@ void dispenseRice() {
   uint16_t lastBtnState = readShiftRegister(); 
   unsigned long cancelDebounce = 0;
 
+  // PHASE 1 BUFFER ADJUSTMENT:
+  // Based on your 0.948kg reading, the true in-flight rice is ~400g. 
+  // Changing the buffer from 0.450 to 0.400 keeps the hatch open just long enough.
   float fastTarget = targetKg - 0.400; 
   if (fastTarget < 0.100) fastTarget = 0.100; 
 
@@ -971,6 +973,8 @@ void dispenseRice() {
   }
 
   // --- PHASE 2: The Gravity Drop ---
+  // Increased delay from 1500ms to 2000ms. This guarantees every single grain 
+  // of in-flight rice has landed and stopped bouncing before the scale is read.
   Serial.println("Phase 2: Settling...");
   delay(2000); 
   if (scale.is_ready()) {
@@ -983,6 +987,8 @@ void dispenseRice() {
     Serial.println("Target reached via in-flight rice! Skipping sweeps.");
   } else {
     // --- PHASE 3: SERVO-SAVER SWEEPS ---
+    // Increased open times (450ms, 300ms, 250ms) to drop more rice per sweep.
+    // Increased max sweeps to 3. Increased sweep settling delay to 1500ms.
     Serial.println("Under target. Starting Servo-Saver sweeps...");
     int sweepAttempts = 0;
     while (currentKg < (targetKg - 0.015) && sweepAttempts < 3) {
