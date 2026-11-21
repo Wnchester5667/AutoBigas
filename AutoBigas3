@@ -5,14 +5,14 @@
 #include <HX711.h>
 #include <ESP32Servo.h> 
 #include <Preferences.h> 
-#include <DNSServer.h> // <-- NEW: Added to keep phones connected without internet
+#include <DNSServer.h> // <-- Captive Portal DNS Server
 
 const char* ssid = "Autobigas.Connect";
 const char* password = "12345678";
 WebServer server(80);
 Preferences preferences; 
 
-// <-- NEW: Captive Portal DNS Server
+// Captive Portal DNS Server
 DNSServer dnsServer; 
 const byte DNS_PORT = 53;
 
@@ -42,7 +42,7 @@ const float PRICE_JASMINE = 58.0;
 const float PRICE_SINANDOMENG = 52.0;
 const float PRICE_DINORADO = 55.0;
 
-float calibrationFactor = 251.69; 
+float calibrationFactor = 232.16; 
 
 const float BIN_EMPTY_DISTANCE = 35.9;
 const float BIN_FULL_DISTANCE = 5.0;
@@ -947,7 +947,7 @@ void handleCalibrationInput() {
 }
 
 // ========================================================================
-// NEW WEB CALIBRATION HANDLERS
+// WEB CALIBRATION HANDLERS (NOW USES THE SAME LOGIC AS THE SERIAL MONITOR)
 // ========================================================================
 void handleCalStart() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -957,8 +957,8 @@ void handleCalStart() {
   }
   
   calStage = 1; 
-  scale.set_scale(); 
-  scale.tare();      
+  scale.set_scale(); // Reset scale to 1 (raw) so tare + get_value work on raw counts
+  scale.tare(20);    // Store the empty-scale offset (20 reads for a stable baseline)
   
   server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
@@ -980,6 +980,13 @@ void handleCalFinish() {
     return;
   }
   
+  // Let the weight settle, identical to the serial monitor version.
+  // Plain delay (not server.handleClient) to avoid re-entering the web server.
+  delay(2000);
+  
+  // Recover the HX711 if it stalled, same as the serial version.
+  if (!scale.is_ready()) { scale.power_down(); delay(5); scale.power_up(); delay(150); }
+  
   if (!scale.is_ready()) {
     calStage = 0;
     scale.set_scale(calibrationFactor);
@@ -987,22 +994,32 @@ void handleCalFinish() {
     return;
   }
   
-  long raw = 0;
-  for(int i=0; i<20; i++) {
-    raw += scale.read();
-    delay(10);
-  }
-  raw /= 20;
-  
+  // SAME CALCULATION AS SERIAL: average of 20 reads MINUS the tare offset.
+  long raw = (long)scale.get_value(20);
   float newFactor = (float)raw / grams;
   
+  // Sanity check: a zero/negative factor means the weight wasn't on the scale
+  // or the scale wasn't tared properly. Restore the old factor and report it.
+  if (newFactor <= 0) {
+    calStage = 0;
+    scale.set_scale(calibrationFactor);
+    server.send(200, "application/json", "{\"status\":\"error\",\"message\":\"Bad reading. Place the weight and retry\"}");
+    return;
+  }
+  
+  // Apply new factor
   calibrationFactor = newFactor;
   scale.set_scale(calibrationFactor);
   
+  // Save to NVS (Flash memory) permanently
   preferences.putFloat("calFactor", calibrationFactor);
   
-  calStage = 0; 
-  scale.tare(); 
+  calStage = 0; // Re-enable normal scale reading
+  
+  // No tare here: the scale was zeroed in Step 1 while empty.
+  
+  Serial.print(F(">>> Web calibration: raw = ")); Serial.print(raw);
+  Serial.print(F(", NEW calibrationFactor = ")); Serial.println(newFactor, 2);
   
   String json = "{\"status\":\"ok\",\"factor\":" + String(newFactor, 2) + "}";
   server.send(200, "application/json", json);
@@ -1101,8 +1118,11 @@ void checkLoadCell() {
 
 void printLoadCellReading() {
   if (millis() - lastLoadCellPrint < loadCellPrintInterval) return;
-  lastLoadCellPrint = millis(); loadCellKg = readLoadCellKg();
-  if (calStage == 1 || calStage == 2) return;
+  lastLoadCellPrint = millis();
+  // Skip reading during calibration: the scale factor is temporarily 1,
+  // so readings would be raw counts and pollute lastGoodKg.
+  if (calStage > 0) return;
+  loadCellKg = readLoadCellKg();
   Serial.print("Current Weight: "); Serial.print(loadCellKg, 3); Serial.println(" kg");
 }
 
@@ -1343,7 +1363,14 @@ void setup() {
   
   // --- LOAD SAVED CALIBRATION FROM FLASH MEMORY ---
   preferences.begin("autobigas", false);
-  calibrationFactor = preferences.getFloat("calFactor", 251.69);
+
+  // ONE-TIME RESET: uncomment this line, upload, let it boot once, then
+  // comment it out again and re-upload. This wipes the bad 308.98 factor
+  // that was saved to flash by the old web calibration code.
+  // preferences.remove("calFactor");
+
+  // Fallback is now the verified 231.56 (was 251.69)
+  calibrationFactor = preferences.getFloat("calFactor", 231.56);
   Serial.print("Loaded calibration factor from memory: "); Serial.println(calibrationFactor, 2);
 
   pinMode(SERVO_JASMINE, OUTPUT); digitalWrite(SERVO_JASMINE, LOW);
@@ -1379,7 +1406,7 @@ void setup() {
     Serial.println("WARNING: HX711/Load Cell not detected at boot!");
   }
   
-  // --- NEW WI-FI STABILITY FEATURES ---
+  // --- WI-FI STABILITY FEATURES ---
   WiFi.setSleep(false); // Prevents ESP32 from sleeping the Wi-Fi radio
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0)); // Force static IP
   WiFi.softAP(ssid, password);
@@ -1405,7 +1432,7 @@ void setup() {
 }
 
 void loop() {
-  dnsServer.processNextRequest(); // <-- NEW: Handles Captive Portal DNS requests
+  dnsServer.processNextRequest(); // Handles Captive Portal DNS requests
   server.handleClient(); 
   handleCalibrationInput();
   if (remoteDispenseRequested && currentState == STATE_IDLE) { remoteDispenseRequested = false; triggerRemoteDispense(remoteCompartment, remoteWeight); }
